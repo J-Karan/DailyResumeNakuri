@@ -7,11 +7,10 @@ import random
 import re
 
 # ================== CONFIG (GLOBAL) ==================
-username = ""   # os.environ.get("USER")
-password = ""   # os.environ.get("PASS")
-file_id = ""    # Google Drive file ID
-form_key = ""   # Extract manually from network tab
-filename = ""   # Optional override (else auto-generated)
+username = os.environ.get("NAUKRI_EMAIL")
+password = os.environ.get("NAUKRI_PASSWORD")
+file_id = os.environ.get("FILE_ID")
+form_key = os.environ.get("FORM_KEY")
 
 
 # ================== UTIL ==================
