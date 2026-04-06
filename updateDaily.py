@@ -11,7 +11,7 @@ username = os.environ.get("NAUKRI_EMAIL")
 password = os.environ.get("NAUKRI_PASSWORD")
 file_id = os.environ.get("FILE_ID")
 form_key = os.environ.get("FORM_KEY")
-
+filename = None
 
 # ================== UTIL ==================
 def generate_file_key(length):
