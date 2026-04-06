@@ -4,14 +4,15 @@ from io import BytesIO
 from datetime import datetime
 import os
 import random
-import re
+import time
 
-# ================== CONFIG (GLOBAL) ==================
+# ================== CONFIG ==================
 username = os.environ.get("NAUKRI_EMAIL")
 password = os.environ.get("NAUKRI_PASSWORD")
 file_id = os.environ.get("FILE_ID")
 form_key = os.environ.get("FORM_KEY")
 filename = None
+
 
 # ================== UTIL ==================
 def generate_file_key(length):
@@ -28,15 +29,29 @@ class NaukriLoginClient:
         self.password = password
         self.session = requests.Session()
 
+    def _warmup_session(self):
+        self.session.get("https://www.naukri.com")
+        time.sleep(1)
+        self.session.get("https://www.naukri.com/nlogin/login")
+        time.sleep(2)
+
     def _get_headers(self):
         return {
-            "accept": "application/json",
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "en-US,en;q=0.9",
             "appid": "105",
             "clientid": "d3skt0p",
             "content-type": "application/json",
+            "origin": "https://www.naukri.com",
             "referer": "https://www.naukri.com/nlogin/login",
+            "sec-ch-ua": '"Not A;Brand";v="99", "Chromium";v="120", "Google Chrome";v="120"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
             "systemid": "jobseeker",
-            "user-agent": "Mozilla/5.0",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "x-requested-with": "XMLHttpRequest",
         }
 
@@ -47,14 +62,33 @@ class NaukriLoginClient:
         }
 
     def login(self):
-        response = self.session.post(
-            self.LOGIN_URL,
-            headers=self._get_headers(),
-            json=self._get_payload()
-        )
-        response.raise_for_status()
-        print("Login status:", response.status_code)
-        return response
+        self._warmup_session()
+
+        for attempt in range(3):
+            try:
+                time.sleep(random.uniform(2, 5))
+
+                response = self.session.post(
+                    self.LOGIN_URL,
+                    headers=self._get_headers(),
+                    json=self._get_payload(),
+                    timeout=15
+                )
+
+                if response.status_code == 403:
+                    print(f"Attempt {attempt+1}: Blocked (403)")
+                    time.sleep(3)
+                    continue
+
+                response.raise_for_status()
+                print("Login success:", response.status_code)
+                return response
+
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed:", e)
+                time.sleep(2)
+
+        raise Exception("Login failed after retries")
 
     def get_cookies(self):
         return self.session.cookies.get_dict()
@@ -102,12 +136,7 @@ class NaukriLoginClient:
 
 
 # ================== MAIN ==================
-def update_resume() -> dict:
-    """
-    Uses global config variables only.
-    """
-
-    # ---- VALIDATION ----
+def update_resume():
     if not username or not password:
         return {"success": False, "error": "Username/password missing"}
 
@@ -117,50 +146,37 @@ def update_resume() -> dict:
     if not form_key:
         return {"success": False, "error": "form_key missing"}
 
-    # ---- FILENAME ----
+    print("Starting job...")
+
     today = datetime.now()
     final_filename = filename or f"resume_{today.strftime('%d_%B_%Y').lower()}.pdf"
-
     FILE_KEY = "U" + generate_file_key(13)
 
-    # ---- LOGIN ----
     client = NaukriLoginClient(username, password)
 
     try:
         client.login()
     except Exception as e:
-        return {"success": False, "error": f"Login failed: {e}"}
+        return {"success": False, "error": str(e)}
 
     token = client.get_bearer_token()
-
     if not token:
         return {"success": False, "error": "Bearer token missing"}
 
     cookies = client.build_required_cookies()
 
-    # ---- DOWNLOAD ----
+    # DOWNLOAD
     drive_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    res = requests.get(drive_url)
 
-    try:
-        res = requests.get(drive_url)
-        res.raise_for_status()
-    except Exception as e:
-        return {"success": False, "error": f"Download failed: {e}"}
+    if res.status_code != 200 or res.content[:4] != b'%PDF':
+        return {"success": False, "error": "Invalid PDF or download failed"}
 
-    if res.content[:4] != b'%PDF':
-        return {"success": False, "error": "Invalid PDF"}
+    time.sleep(random.uniform(2, 4))
 
-    # ---- UPLOAD ----
+    # UPLOAD
     upload_resp = requests.post(
         "https://filevalidation.naukri.com/file",
-        headers={
-            "accept": "application/json",
-            "appid": "105",
-            "origin": "https://www.naukri.com",
-            "referer": "https://www.naukri.com/",
-            "systemid": "fileupload",
-            "user-agent": "Mozilla/5.0",
-        },
         files={"file": (final_filename, BytesIO(res.content), "application/pdf")},
         data={
             "formKey": form_key,
@@ -170,20 +186,8 @@ def update_resume() -> dict:
         }
     )
 
-    try:
-        upload_resp.raise_for_status()
-    except Exception as e:
-        return {"success": False, "error": f"Upload failed: {e}"}
+    upload_resp.raise_for_status()
 
-    # ---- PARSE FILE KEY ----
-    try:
-        upload_json = upload_resp.json()
-        if FILE_KEY not in upload_json:
-            FILE_KEY = next(iter(upload_json.keys()))
-    except Exception:
-        pass
-
-    # ---- PROFILE UPDATE ----
     profile_id = client.fetch_profile_id()
 
     profile_url = f"https://www.naukri.com/cloudgateway-mynaukri/resman-aggregator-services/v0/users/self/profiles/{profile_id}/advResume"
@@ -196,43 +200,20 @@ def update_resume() -> dict:
         }
     }
 
-    try:
-        resp = client.session.post(
-            profile_url,
-            headers={
-                "accept": "application/json",
-                "authorization": f"Bearer {token}",
-                "content-type": "application/json",
-                "origin": "https://www.naukri.com",
-                "referer": "https://www.naukri.com/",
-                "user-agent": "Mozilla/5.0",
-                "x-http-method-override": "PUT",
-            },
-            cookies=cookies,
-            data=json.dumps(payload)
-        )
+    resp = client.session.post(
+        profile_url,
+        headers={
+            "authorization": f"Bearer {token}",
+            "content-type": "application/json",
+        },
+        cookies=cookies,
+        data=json.dumps(payload)
+    )
 
-        resp.raise_for_status()
+    resp.raise_for_status()
 
-    except Exception as e:
-        return {"success": False, "error": f"Profile update failed: {e}"}
-
-    return {
-        "success": True,
-        "file_key": FILE_KEY,
-        "message": "Resume updated successfully"
-    }
-
-
-# ================== HANDLER ==================
-def handler(event, context):
-    print("Cron job started")
-
-    return {
-        "status": update_resume(),
-        "message": "Cron executed successfully"
-    }
+    return {"success": True, "message": "Resume updated successfully"}
 
 
 # ================== RUN ==================
-print(handler("event", "context"))
+print(update_resume())
